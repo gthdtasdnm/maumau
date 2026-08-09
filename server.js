@@ -5,6 +5,12 @@
 import { darfRaumOeffnen, raumVermerkt } from "./bremse.js";
 import { cleanName, raumverwaltung, shuffle } from "./raum.js";
 import { starte } from "./statisch.js";
+// Die Regeln liegen in einer eigenen Datei, damit `probe.js` dieselben
+// Funktionen pruefen kann, die hier laufen - nicht nachgebaute daneben.
+import {
+  FARBEN, gib, neuesDeck, passt as passtNach,
+  sortiere as sortiereHand, taugtAlsStart, wirkung,
+} from "./regeln.js";
 
 const PORT = Number(Deno.env.get("PORT") ?? 8066);
 const HOST = Deno.env.get("HOST") ?? "0.0.0.0";
@@ -13,11 +19,7 @@ const PUBLIC = new URL("./public/", import.meta.url);
 const MAX_PLAYERS = 6;
 const MIN_PLAYERS = 2;
 
-const RAENGE = ["7", "8", "9", "10", "B", "D", "K", "A"];
-const FARBEN = ["♠", "♥", "♦", "♣"];
 const STARTHAND = 5;
-
-const neuesDeck = () => shuffle(FARBEN.flatMap((f) => RAENGE.map((r) => ({ r, f }))));
 
 const {
   rooms, browsing,
@@ -76,10 +78,10 @@ function startGame(room) {
     for (let i = 0; i < STARTHAND; i++) p.hand.push(room.talon.pop());
     sortiere(p);
   }
-  // Die erste offene Karte darf keine Sonderkarte sein – sonst müsste schon
-  // vor dem ersten Zug jemand ziehen oder aussetzen.
+  // Die erste offene Karte darf nichts auslösen – sonst müsste schon vor dem
+  // ersten Zug jemand ziehen, aussetzen oder eine Farbe wünschen.
   let erste = room.talon.pop();
-  while (["7", "8", "B"].includes(erste.r)) {
+  while (!taugtAlsStart(erste, room.settings)) {
     room.talon.unshift(erste);
     erste = room.talon.pop();
   }
@@ -90,22 +92,16 @@ function startGame(room) {
   pushRoomList();
 }
 
-const sortiere = (p) =>
-  p.hand.sort((a, b) => a.f.localeCompare(b.f) || RAENGE.indexOf(a.r) - RAENGE.indexOf(b.r));
+const sortiere = (p) => sortiereHand(p.hand);
 
 const oben = (room) => room.ablage[room.ablage.length - 1];
 
 function ziehe(room, p, n) {
-  for (let i = 0; i < n; i++) {
-    if (!room.talon.length) {
-      // Ablage bis auf die oberste Karte zurück in den Talon.
-      const top = room.ablage.pop();
-      room.talon = shuffle(room.ablage);
-      room.ablage = [top];
-      if (!room.talon.length) return;
-    }
-    p.hand.push(room.talon.pop());
-  }
+  // Nachmischen macht `gib` in regeln.js – dort ist es ohne Server prüfbar.
+  const { talon, ablage, gezogen } = gib(room.talon, room.ablage, n);
+  room.talon = talon;
+  room.ablage = ablage;
+  p.hand.push(...gezogen);
   p.mau = false;
   sortiere(p);
 }
@@ -124,14 +120,14 @@ function weiterWennWeg(room) {
   pushRunde(room);
 }
 
-/** Passt die Karte auf die Ablage? Ein gewünschter Farbwunsch schlägt alles. */
-function passt(room, k) {
-  const top = oben(room);
-  if (room.settings.bube && k.r === "B") return true;
-  if (room.wunsch) return k.f === room.wunsch;
-  if (room.strafe > 0 && room.settings.sieben) return k.r === "7";
-  return k.f === top.f || k.r === top.r;
-}
+/** Passt die Karte auf die Ablage? Gerechnet wird in `regeln.js`. */
+const passt = (room, k) =>
+  passtNach(k, {
+    oben: oben(room),
+    wunsch: room.wunsch,
+    strafe: room.strafe,
+    regeln: room.settings,
+  });
 
 function pushRunde(room) {
   if (room.phase !== "playing") return;
@@ -150,6 +146,9 @@ function pushRunde(room) {
       wunsch: room.wunsch,
       strafe: room.strafe,
       talon: room.talon.length,
+      // Die Zahl steht nicht im Bildschirm; sie ist da, damit sich nachrechnen
+      // laesst, dass keine Karte verschwindet: Haende + Talon + Ablage = 32.
+      ablage: room.ablage.length,
       spieler,
       fertig: room.fertig.map((id) => room.players.get(id)?.name ?? "?"),
       hand: p.hand,
@@ -332,15 +331,14 @@ function handle(ws, msg) {
       }
 
       // Sonderkarten
-      let ueberspringen = 0;
-      if (k.r === "7" && room.settings.sieben) room.strafe += 2;
-      if (k.r === "8" && room.settings.acht) ueberspringen = 1;
-      if (k.r === "B" && room.settings.bube) {
+      const w = wirkung(k, room.settings);
+      room.strafe += w.strafePlus;
+      if (w.wuenscht) {
         room.wuenscht = true;   // derselbe Spieler sagt jetzt die Farbe an
         pushRunde(room);
         break;
       }
-      room.amZug = naechster(room, player.id, ueberspringen);
+      room.amZug = naechster(room, player.id, w.ueberspringen);
       pushRunde(room);
       break;
     }
